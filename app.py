@@ -11,6 +11,8 @@ import os
 from dotenv import find_dotenv, load_dotenv
 from langchain_openai import ChatOpenAI
 from docx import Document # For creating .docx files
+from docx.shared import Pt, RGBColor # For font size and color
+from docx.enum.text import WD_ALIGN_PARAGRAPH # For aligning horizontal rule
 from io import BytesIO # To handle document in memory for download
 
 # --- Configuration Constants (mostly for Azure DevOps) ---
@@ -151,21 +153,29 @@ def generate_combined_functional_document(all_stories_data, llm_instance, progre
     combined_fallback_text = "".join(fallback_content_parts)
 
     prompt = f"""
-You are an expert technical writer and business analyst. Create ONE consolidated, comprehensive functional document synthesizing information from the following Azure DevOps user stories. Aim for a coherent narrative, not just a list.
+You are an expert technical writer and business analyst. Your task is to create ONE consolidated, comprehensive functional document by synthesizing information from the provided Azure DevOps user stories.
+
+**Output Requirements:**
+1.  **Document Title:** Begin your response *directly* with a concise and descriptive title for the functional document. Do not include any introductory phrases like "Okay, here is..." or "Consolidated Functional Document:". For example, a good title might be "Enhanced Short-Pick Handling in WMS".
+2.  **Document Body:** Following the title, structure the document as follows:
+    *   **1. Overall Objective / Epic Summary (if discernible from the stories)**
+    *   **2. Key Functionalities Addressed:**
+        *   Describe the core functionalities or features covered by this document in a narrative style.
+        *   Integrate the essence of the user stories provided.
+        *   Avoid directly mentioning "user story IDs" or presenting it as a list of Azure DevOps items. Instead, explain what enhancements or capabilities are being introduced. For example, instead of "Story 123: Implement X", say "This document outlines the implementation of X, which allows users to...".
+    *   **3. Detailed Functional Breakdown**: For each key area or synthesized feature:
+        *   **Context and Rationale**: Summarize the background, core problems, and their business impacts that necessitate this functionality.
+        *   **Functional Description**: Provide an integrated description of how the functionality works, drawing from the user story details.
+        *   **Verification Criteria**: Consolidate or list key criteria that will be used to confirm the functionality is implemented correctly, in a clear, testable format.
+    *   **4. Cross-cutting Concerns / Shared Elements (if any relevant)**
+
+**Important Style Guidelines:**
+*   Maintain a professional and formal tone throughout the document.
+*   The goal is to produce a document that reads like a standard, well-written functional specification.
+*   **Avoid any meta-commentary about the document itself or internal team communications.** For example, do not include sentences like "Technical documentation detailing backend changes... must be developed and shared with the Quality Assurance (QA) team..." or "Comprehensive user documentation will be required...". Focus solely on describing the functionality.
 
 User Stories Data:
 {consolidated_stories_info}
-
-Structure the Consolidated Functional Document as follows:
-1.  **Overall Objective / Epic Summary (if discernible)**
-2.  **Key Features/Stories Covered** (Summarize main stories)
-3.  **Detailed Functional Breakdown**: For each key area or synthesized feature:
-    *   **Problem Statement & Impact**: Summarize core problems and impacts.
-    *   **Functional Description**: Integrate details from story descriptions.
-    *   **Acceptance Criteria**: Consolidate or list key acceptance criteria.
-4.  **Cross-cutting Concerns / Shared Elements (if any)**
-
-Maintain a professional tone.
     """
     try:
         progress_bar_slot.info("Invoking LLM to generate combined document... (this may take a moment)")
@@ -178,8 +188,7 @@ Maintain a professional tone.
         return combined_fallback_text
 
 # --- Streamlit App UI (Simplified, PAT from env or UI fallback) ---
-st.title("Azure DevOps Functional Document Generator")
-st.info(f"Using LLM: {llm_client.model_name if llm_client else 'N/A'}")
+st.title("Functional Document Generator")
 
 # Get PAT: Try from environment (for deployed app), fallback to UI input for local dev
 azure_pat_from_env = os.getenv("AZURE_DEVOPS_PAT")
@@ -262,37 +271,151 @@ if st.session_state.generated_document:
     # --- Create DOCX for download ---
     try:
         doc = Document()
-        # Add title (optional, can be more sophisticated)
-        doc.add_heading('Combined Functional Document', level=1)
+
+        # Define and apply styles
+        # Normal text style
+        style_normal = doc.styles['Normal']
+        font_normal = style_normal.font
+        font_normal.size = Pt(13)
+
+        # Define a blue color
+        blue_color = RGBColor(0x1E, 0x88, 0xE5) # A pleasant shade of blue
+
+        # Heading 1 style
+        style_h1 = doc.styles['Heading 1']
+        font_h1 = style_h1.font
+        font_h1.size = Pt(20)
+        font_h1.color.rgb = blue_color
+        font_h1.bold = True 
+        para_format_h1 = style_h1.paragraph_format
+        para_format_h1.space_after = Pt(12) # Add 12pt space after H1
+
+        # Heading 2 style
+        style_h2 = doc.styles['Heading 2']
+        font_h2 = style_h2.font
+        font_h2.size = Pt(16)
+        font_h2.color.rgb = blue_color
+        font_h2.bold = True
+        para_format_h2 = style_h2.paragraph_format
+        para_format_h2.space_after = Pt(8) # Add 8pt space after H2
+
+        # Heading 3 style
+        style_h3 = doc.styles['Heading 3']
+        font_h3 = style_h3.font
+        font_h3.size = Pt(14)
+        font_h3.color.rgb = blue_color
+        font_h3.bold = True
+        para_format_h3 = style_h3.paragraph_format
+        para_format_h3.space_after = Pt(6) # Add 6pt space after H3
+
+        full_markdown_content = st.session_state.generated_document
+
+        # Pre-processing for the entire content (e.g., em space)
+        full_markdown_content = full_markdown_content.replace('\u2003', ' ') 
+        full_markdown_content = full_markdown_content.strip()
+
+        # Extract title (first line) and the rest of the content
+        content_lines = full_markdown_content.split('\n', 1)
+        doc_title_raw = content_lines[0].strip()
+        markdown_body = content_lines[1].strip() if len(content_lines) > 1 else ""
+
+        # Clean the extracted title (remove potential markdown heading markers)
+        doc_title_cleaned = re.sub(r'^[#\s]*', '', doc_title_raw)
         
-        # Split the markdown content by lines and add as paragraphs
-        # This is a basic conversion. For full markdown to docx, a library like pandoc (via subprocess) or a dedicated Python markdown-to-docx converter would be better.
-        # For now, we'll add line by line. Lines starting with #, ##, ===, --- could be styled.
-        
-        lines = st.session_state.generated_document.split('\n')
-        for line in lines:
-            if line.startswith('# '): # H1
-                doc.add_heading(line[2:], level=1)
-            elif line.startswith('## '): # H2
-                doc.add_heading(line[3:], level=2)
-            elif line.startswith('### '): # H3
-                doc.add_heading(line[4:], level=3)
-            elif line.startswith('====='): # Could be an H1 underline
-                if doc.paragraphs and doc.paragraphs[-1].text: # Check if previous paragraph is not empty
-                    # This is a simple heuristic, might not always be correct
-                    # For now, we'll just skip these lines as they are part of markdown H1/H2 syntax
-                    pass 
-            elif line.startswith('-----'): # Could be an H2 underline or thematic break
-                 # For now, we'll just skip these lines
-                pass
-            elif line.strip() == '---': # Thematic break
-                doc.add_page_break() # Or some other separator
-            elif line.strip().startswith('* ') or line.strip().startswith('- '): # Basic list item
-                # python-docx can create bulleted lists, but requires more structure.
-                # For simplicity, adding as a paragraph with the leading char.
-                doc.add_paragraph(line)
+        # Further pre-processing for the body
+        markdown_body = re.sub(r'(\r\n|\r|\n){3,}', '\n\n', markdown_body) # Consolidate >2 newlines
+        markdown_body = markdown_body.strip()
+
+        # Helper function to add text with inline formatting to a paragraph object
+        def add_runs_to_paragraph(paragraph, text_content):
+            # Regex to split by bold/italic markers, non-greedy
+            # Handles **bold**, *italic*, __bold__, _italic_
+            segments = re.split(r'(\*\*(?:(?!\*\*).)*\*\*|\*(?:(?!\*).)*\*|__(?:(?!__).)*__|_(?:(?!_).)*_)', text_content)
+            
+            for segment in segments:
+                if not segment: # Skip empty strings that can result from split
+                    continue
+                
+                run = paragraph.add_run()
+                if (segment.startswith('**') and segment.endswith('**')) or \
+                   (segment.startswith('__') and segment.endswith('__')): # Bold
+                    run.text = segment[2:-2]
+                    run.bold = True
+                elif (segment.startswith('*') and segment.endswith('*')) or \
+                     (segment.startswith('_') and segment.endswith('_')): # Italic
+                    run.text = segment[1:-1]
+                    run.italic = True
+                else: # Regular text
+                    run.text = segment
+
+        # Add the extracted and cleaned title to the document
+        if doc_title_cleaned:
+            title_heading = doc.add_heading(level=1) 
+            add_runs_to_paragraph(title_heading, doc_title_cleaned)
+
+        # Process line by line from markdown_body
+        lines = markdown_body.split('\n')
+        paragraph_buffer = [] # To collect lines for a single paragraph
+
+        # Note: The main document title (level 0 or 1) is now handled above.
+        # The loop below will handle subsequent headings (H1, H2, H3 from markdown as H1,H2,H3 in docx)
+
+        for i, line_raw in enumerate(lines):
+            line = line_raw.strip()
+
+            # Handle paragraph breaks (empty line)
+            if not line:
+                if paragraph_buffer:
+                    p_text = " ".join(paragraph_buffer) # Join lines with space
+                    add_runs_to_paragraph(doc.add_paragraph(), p_text)
+                    paragraph_buffer = []
+                continue 
+
+            # Headings
+            if line.startswith('# '):
+                if paragraph_buffer: add_runs_to_paragraph(doc.add_paragraph(), " ".join(paragraph_buffer)); paragraph_buffer = []
+                heading_text = line[2:].strip()
+                h = doc.add_heading(level=1)
+                add_runs_to_paragraph(h, heading_text)
+            elif line.startswith('## '):
+                if paragraph_buffer: add_runs_to_paragraph(doc.add_paragraph(), " ".join(paragraph_buffer)); paragraph_buffer = []
+                heading_text = line[3:].strip()
+                h = doc.add_heading(level=2)
+                add_runs_to_paragraph(h, heading_text)
+            elif line.startswith('### '):
+                if paragraph_buffer: add_runs_to_paragraph(doc.add_paragraph(), " ".join(paragraph_buffer)); paragraph_buffer = []
+                heading_text = line[4:].strip()
+                h = doc.add_heading(level=3)
+                add_runs_to_paragraph(h, heading_text)
+            # Thematic break (---, ***, ___)
+            elif line == '---' or line == '***' or line == '___':
+                if paragraph_buffer: add_runs_to_paragraph(doc.add_paragraph(), " ".join(paragraph_buffer)); paragraph_buffer = []
+                if line == '---': # '---' is treated as a page break
+                     doc.add_page_break()
+                else: # For ***, ___ draw a visual horizontal line
+                     hr_p = doc.add_paragraph()
+                     hr_p.add_run("_________________________________________")
+                     hr_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            # Unordered List items (*, -, +)
+            elif line.startswith('* ') or line.startswith('- ') or line.startswith('+ '):
+                if paragraph_buffer: add_runs_to_paragraph(doc.add_paragraph(), " ".join(paragraph_buffer)); paragraph_buffer = []
+                item_text = line[2:].strip()
+                p = doc.add_paragraph(style='ListBullet')
+                add_runs_to_paragraph(p, item_text)
+            # Ordered List items (1., 2.)
+            elif re.match(r'^\d+\.\s', line):
+                if paragraph_buffer: add_runs_to_paragraph(doc.add_paragraph(), " ".join(paragraph_buffer)); paragraph_buffer = []
+                item_text = re.sub(r'^\d+\.\s', '', line).strip()
+                p = doc.add_paragraph(style='ListNumber')
+                add_runs_to_paragraph(p, item_text)
+            # Regular text line, add to buffer
             else:
-                doc.add_paragraph(line)
+                paragraph_buffer.append(line_raw) # Keep original spacing for paragraph internal lines
+
+        # Add any remaining text in the buffer
+        if paragraph_buffer:
+            p_text = "\n".join(paragraph_buffer) # Join lines with newline for multi-line paragraphs
+            add_runs_to_paragraph(doc.add_paragraph(), p_text)
         
         # Save to a BytesIO object
         bio = BytesIO()
