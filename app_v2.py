@@ -342,25 +342,46 @@ if st.button("Generate Document", type="primary", use_container_width=True, key=
         st.session_state.processed_ids_for_run = []
         status_placeholder.info("Starting document generation process...")
 
-        parent_work_item_id = extract_work_item_id(parent_id_input)
-        if not parent_work_item_id:
-            st.error("Invalid parent work item link or ID.")
+        # Support multiple comma-separated IDs/links
+        input_items = [x.strip() for x in parent_id_input.split(",") if x.strip()]
+        if not input_items:
+            st.error("Invalid work item link(s) or ID(s).")
         else:
-            # Fetch all child user story IDs
-            child_story_ids = get_child_story_ids(parent_work_item_id, current_pat_to_use, status_placeholder)
+            all_story_ids_to_fetch = set()
+            parent_ids = []
+            child_ids = []
+            parent_to_child_ids = {}
+            status_placeholder.info("Processing input work items...")
+
+            # First pass: determine which are parents (have children) and which are normal
+            for item in input_items:
+                work_item_id = extract_work_item_id(item)
+                if not work_item_id:
+                    st.warning(f"Invalid work item link or ID: {item}")
+                    continue
+                # Check for child stories
+                child_story_ids = get_child_story_ids(work_item_id, current_pat_to_use, status_placeholder)
+                if child_story_ids:
+                    parent_ids.append(work_item_id)
+                    parent_to_child_ids[work_item_id] = child_story_ids
+                    all_story_ids_to_fetch.add(work_item_id)
+                    for cid in child_story_ids:
+                        all_story_ids_to_fetch.add(cid)
+                else:
+                    child_ids.append(work_item_id)
+                    all_story_ids_to_fetch.add(work_item_id)
+
+            # Deduplicate
+            all_story_ids_to_fetch = list(all_story_ids_to_fetch)
+            st.session_state.processed_ids_for_run = []
+
             all_stories_data = []
             has_errors = False
 
-            if not child_story_ids:
-                st.error("No child user stories found for the given parent work item.")
-            else:
-                st.info(f"Found {len(child_story_ids)} child user stories for the selected parent work item.")
-
-                # Fetch parent story details and add to all_stories_data first
-                parent_story_data = get_azure_devops_story_details(
-                    parent_work_item_id, current_pat_to_use, status_placeholder
-                )
-                parent_raw_json_payload = None
+            # Fetch all story details
+            for sid in all_story_ids_to_fetch:
+                story_data = get_azure_devops_story_details(sid, current_pat_to_use, status_placeholder)
+                raw_json_payload = None
                 try:
                     AZURE_DEVOPS_ORG_CONFIG = os.getenv("AZURE_DEVOPS_ORG_CONFIG")
                     AZURE_DEVOPS_PROJECT_CONFIG = os.getenv("AZURE_DEVOPS_PROJECT_CONFIG")
@@ -368,57 +389,31 @@ if st.button("Generate Document", type="primary", use_container_width=True, key=
                     credentials = f":{current_pat_to_use}"
                     encoded_credentials = base64.b64encode(credentials.encode()).decode()
                     headers = {"Authorization": f"Basic {encoded_credentials}", "Content-Type": "application/json"}
-                    url = f"https://dev.azure.com/{AZURE_DEVOPS_ORG_CONFIG}/{AZURE_DEVOPS_PROJECT_CONFIG}/_apis/wit/workitems/{parent_work_item_id}?$expand=all&api-version={AZURE_API_VERSION_CONFIG}"
+                    url = f"https://dev.azure.com/{AZURE_DEVOPS_ORG_CONFIG}/{AZURE_DEVOPS_PROJECT_CONFIG}/_apis/wit/workitems/{sid}?$expand=all&api-version={AZURE_API_VERSION_CONFIG}"
                     resp = requests.get(url, headers=headers, timeout=30)
                     resp.raise_for_status()
-                    parent_raw_json_payload = resp.json()
+                    raw_json_payload = resp.json()
                 except Exception:
-                    parent_raw_json_payload = None
-
-                all_stories_data = []
-                if parent_story_data:
-                    parent_story_data["_raw_json_payload"] = parent_raw_json_payload
-                    all_stories_data.append(parent_story_data)
-                    st.session_state.processed_ids_for_run.append(str(parent_work_item_id))
-
-                for story_id in child_story_ids:
-                    story_data = get_azure_devops_story_details(
-                        story_id, current_pat_to_use, status_placeholder
-                    )
-                    # Fetch the raw JSON payload for this story
                     raw_json_payload = None
-                    try:
-                        AZURE_DEVOPS_ORG_CONFIG = os.getenv("AZURE_DEVOPS_ORG_CONFIG")
-                        AZURE_DEVOPS_PROJECT_CONFIG = os.getenv("AZURE_DEVOPS_PROJECT_CONFIG")
-                        AZURE_API_VERSION_CONFIG = os.getenv("AZURE_API_VERSION_CONFIG")
-                        credentials = f":{current_pat_to_use}"
-                        encoded_credentials = base64.b64encode(credentials.encode()).decode()
-                        headers = {"Authorization": f"Basic {encoded_credentials}", "Content-Type": "application/json"}
-                        url = f"https://dev.azure.com/{AZURE_DEVOPS_ORG_CONFIG}/{AZURE_DEVOPS_PROJECT_CONFIG}/_apis/wit/workitems/{story_id}?$expand=all&api-version={AZURE_API_VERSION_CONFIG}"
-                        resp = requests.get(url, headers=headers, timeout=30)
-                        resp.raise_for_status()
-                        raw_json_payload = resp.json()
-                    except Exception:
-                        raw_json_payload = None
 
-                    if story_data:
-                        story_data["_raw_json_payload"] = raw_json_payload
-                        all_stories_data.append(story_data)
-                        st.session_state.processed_ids_for_run.append(str(story_id))
-                    else:
-                        has_errors = True 
-
-                if all_stories_data and not has_errors:
-                    status_placeholder.info(f"All data fetched for parent and child user stories: {', '.join(st.session_state.processed_ids_for_run)}. Generating combined document...")
-                    combined_doc = generate_combined_functional_document(all_stories_data, llm_client, status_placeholder)
-                    st.session_state.generated_document = combined_doc
-                    st.session_state.all_stories_data = all_stories_data  # Store for expander
-                    if "LLM Failed" not in combined_doc:
-                        status_placeholder.success("Document generation complete!")
-                elif not all_stories_data:
-                    status_placeholder.error("No valid story data could be fetched. Cannot generate document.")
+                if story_data:
+                    story_data["_raw_json_payload"] = raw_json_payload
+                    all_stories_data.append(story_data)
+                    st.session_state.processed_ids_for_run.append(str(sid))
                 else:
-                    status_placeholder.warning("Document generation skipped or incomplete due to errors in fetching some work items. Please review messages above.")
+                    has_errors = True
+
+            if all_stories_data and not has_errors:
+                status_placeholder.info(f"All data fetched for work items: {', '.join(st.session_state.processed_ids_for_run)}. Generating combined document...")
+                combined_doc = generate_combined_functional_document(all_stories_data, llm_client, status_placeholder)
+                st.session_state.generated_document = combined_doc
+                st.session_state.all_stories_data = all_stories_data  # Store for expander
+                if "LLM Failed" not in combined_doc:
+                    status_placeholder.success("Document generation complete!")
+            elif not all_stories_data:
+                status_placeholder.error("No valid story data could be fetched. Cannot generate document.")
+            else:
+                status_placeholder.warning("Document generation skipped or incomplete due to errors in fetching some work items. Please review messages above.")
 
 if st.session_state.generated_document:
     import streamlit.components.v1 as components
@@ -428,31 +423,68 @@ if st.session_state.generated_document:
         mermaid_match = re.search(r"```mermaid\s*([\s\S]+?)```", st.session_state.generated_document)
         doc_to_display = st.session_state.generated_document
         if mermaid_match:
-            mermaid_code = mermaid_match.group(1)
-            # Clean up Mermaid code: remove leading/trailing whitespace and normalize indentation
-            mermaid_code_clean = "\n".join([line.lstrip() for line in mermaid_code.strip().splitlines() if line.strip()])
-            # Remove the mermaid code block from the markdown before displaying
-            doc_to_display = re.sub(r"```mermaid\s*([\s\S]+?)```", "", doc_to_display)
-            # Render the diagram visually using Mermaid.js via HTML with a visible border
-            import uuid
-            unique_id = f"mermaid-container-{uuid.uuid4().hex}"
-            components.html(
-                f"""
-                <div id="{unique_id}" style="border:2px solid #888; min-height:400px; margin-bottom:10px; overflow:auto; max-height:1200px;">
-                  <div class="mermaid">
+            # For single story, do not show diagram if it would be a single node
+            if hasattr(st.session_state, "all_stories_data") and len(st.session_state.all_stories_data) == 1:
+                story = st.session_state.all_stories_data[0]
+                story_title = story.get("title", "User Story")
+                # If the fallback diagram would be a single node, skip rendering
+                # (i.e., do nothing: do not show diagram, do not show code block)
+                pass
+            else:
+                mermaid_code = mermaid_match.group(1)
+                # Clean up Mermaid code: remove leading/trailing whitespace and normalize indentation
+                mermaid_code_clean = "\n".join([line.lstrip() for line in mermaid_code.strip().splitlines() if line.strip()])
+                # Remove the mermaid code block from the markdown before displaying
+                doc_to_display = re.sub(r"```mermaid\s*([\s\S]+?)```", "", doc_to_display)
+
+                # --- Mermaid v11.6.0 compatibility check ---
+                def is_mermaid_v11_compatible(code: str) -> (bool, str):
+                    # Basic checks: must start with 'flowchart TD' and not contain unsupported syntax
+                    lines = [l.strip() for l in code.splitlines() if l.strip()]
+                    if not lines or not lines[0].startswith("flowchart TD"):
+                        return False, "Mermaid diagram must start with 'flowchart TD' for compatibility with version 11.6.0."
+                    # Check for unsupported constructs (e.g., subgraph, new syntax, etc.)
+                    unsupported_keywords = ["subgraph", "click ", ":::"]  # Add more as needed
+                    for kw in unsupported_keywords:
+                        if any(kw in l for l in lines):
+                            return False, f"Mermaid diagram contains unsupported syntax for v11.6.0: '{kw}'."
+                    # Must have at least one edge (--> or --)
+                    has_edge = any("-->" in l or "--" in l for l in lines[1:])
+                    if not has_edge:
+                        return False, "Mermaid diagram must contain at least one edge (e.g., 'A --> B')."
+                    # No empty diagrams
+                    if len(lines) < 2:
+                        return False, "Mermaid diagram is empty."
+                    # Suppress diagram if only a single node (no edges)
+                    node_lines = [l for l in lines[1:] if "[" in l and "]" in l]
+                    if has_edge is False and len(node_lines) == 1:
+                        return False, "Mermaid diagram contains only a single node; diagram suppressed."
+                    return True, ""
+
+                is_valid, err_msg = is_mermaid_v11_compatible(mermaid_code_clean)
+                import uuid
+                unique_id = f"mermaid-container-{uuid.uuid4().hex}"
+                if is_valid:
+                    components.html(
+                        f"""
+                        <div id="{unique_id}" style="border:2px solid #888; min-height:400px; margin-bottom:10px; overflow:auto; max-height:1200px;">
+                          <div class="mermaid">
 {mermaid_code_clean}
-                  </div>
-                </div>
-                <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
-                <script>
-                if (window.mermaid) {{
-                    mermaid.initialize({{startOnLoad:true}});
-                    mermaid.init(undefined, "#{unique_id} .mermaid");
-                }}
-                </script>
-                """,
-                height=1200,
-            )
+                          </div>
+                        </div>
+                        <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+                        <script>
+                        if (window.mermaid) {{
+                            mermaid.initialize({{startOnLoad:true}});
+                            mermaid.init(undefined, "#{unique_id} .mermaid");
+                        }}
+                        </script>
+                        """,
+                        height=1200,
+                    )
+                else:
+                    # Suppress all invalid diagrams (do not show warning or code block)
+                    pass
         # Show the document without the mermaid code block
         st.markdown(doc_to_display)
         st.divider() # Visual separation before download buttons
